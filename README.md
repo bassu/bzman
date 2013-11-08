@@ -23,6 +23,8 @@ On the plus side, it also monitors pool health status and usage capacity as well
 - Uses optimized SSH for fast transfers (without compresssion, arcfour encryption)
 - Ability to use mbuffer if needed
 
+(Requires Python2.6+, tested on RHEL6)
+
 ### Screenshots
 
 ##### Replication
