@@ -1,0 +1,778 @@
+#!/usr/bin/python
+# tool to monitor, report and send incremental backups
+# by: bassu@phi9.com
+
+import os
+import re
+import sys
+import time
+import getopt
+import signal
+import shelve
+import smtplib
+import datetime
+import tempfile
+import subprocess
+from platform import node
+import logging, logging.handlers
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+
+class Options():
+    '''sets the needed defaults and help'''
+    def __init__(self, cmdline):
+        self.cmdline = cmdline
+        self.monitorpool = False
+        self.checksize = False
+        self.poolname = None 
+        self.reportto = 'root'
+        self.host = None
+        self.send = False
+
+        ## defaults
+        self.log = True
+        self.sendreport = False
+        self.printreport = False
+        self.snapprefix = 'incremental'
+        self.usembuffer = False
+        self.mbufferram = '500M'
+        self.snapkeep = 752
+        self.capacitythreshold = 75
+        self.smtpserver = 'localhost'
+        self.smtpport = 25
+        self.smtpfrom = 'bzman@{0}'.format(node())
+        self.smtpto = 'root'
+        ## other defaults
+        self.timeobj = datetime.datetime.now()
+        self.time = self.timeobj.strftime('%Y-%m-%dT%H:%M')
+        self.dbtime = self.timeobj.strftime('D%Y%m%dT%H%M')
+        self.localhost = node().split('.')[0]
+        ## parse the opts and their values
+        try:
+            opts, args = getopt.getopt(cmdline, 'mchps:r:', ['help'])
+            for opt, value  in opts:
+                if opt == '-m':
+                    self.monitorpool = True
+                if opt == '-c':
+                    self.checksize = True
+                if opt == '-p':
+                    self.printreport = True    
+                if opt == '-r':
+                    self.sendreport = True
+                    self.reportto = value
+                if opt == '-s':
+                    self.send = True
+                    self.poolname = value
+                if opt in ('-h', '--help'):
+                    self.usage()
+                    sys.exit(0)
+        except getopt.error as e:
+            print "bzman: {0}".format(e)
+            print "see -h for options"
+            sys.exit(1)
+        ## and the remaining arg
+        if self.send == True:     
+           if args:
+               self.host = args[0]
+               self.ssh = ['ssh', '-T', '-c', 'arcfour', '-o', 'Compression=no', '-x', '-p1998', self.host, '--']        
+           else:
+               print "bzman: you must specify the host to send the zfs stream to!"
+               print "see -h for options"
+               sys.exit(1)
+               
+    def usage(self):
+        '''show the help menu'''
+        print "Usage: bzman [options]"
+        print "bzman - ZFS managing tool to monitor health, check free space, report,"
+        print "compute and send auto incremental ZFS pool replication streams"
+        print '''
+    Options:
+    -m                  monitors health status of ZFS pools and
+                        sends error email if unhealthy
+
+    -c                  checks free size of ZFS pools and
+                        sends an email if it's less than 25%
+
+    -s [pool] [host]    sends datasets/zvols in ZFS [pool] to same
+                        [pool] on host via fast arcfour SSH or mbuffer
+
+    -p                  print the daily report of incremental snapshots
+                        streams, looks kinda like a replication log
+
+    -r [to]             sends immediate daily report of incremental streams 
+                        to [to] recipient
+
+    -h|--help           show this help menu
+
+    Defaults: 
+    - Error/report emails are sent to root (changeable in /etc/aliases).
+    - Daily report is sent at midnight.
+    - Initial replication is automatic, destination pool with same name must exist.
+    - All info and error messages are also logged to syslog.
+    - Incremental backup time is assumed at 10 mins (cron to be setup with).
+    - Snapshots are prefixed 'incremental' and kept for a week i.e. 3*24*7
+    - Destination pool name is chosen based on source pool name and will 
+      fail if it doesn't exit. 
+    '''
+        return
+
+        
+def logger(msg, level='info', mailsubject='', printlog=True):
+    '''logs info/error messages to syslog and errors to smtp logging handlers'''
+    # initialize a logger, set level and format
+    logging.raiseExceptions = False
+    logger = logging.getLogger('bzman_logger')
+    logger.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(filename)s: %(levelname)s %(message)s')
+    
+    # adding handler only once
+    if not getattr(logger, 'handlers', None):
+        # add a syslog handler with local unix socket and syslog facility
+        # or else messages of type level 'error' won't log at all  ;)
+        syslog = logging.handlers.SysLogHandler('/dev/log', 'syslog')
+        syslog.setLevel(logging.DEBUG)
+        syslog.setFormatter(formatter)
+        logger.addHandler(syslog)
+    # now the conditional smtp logger handler; and only once
+    if level == 'error' and len(getattr(logger, 'handlers', None)) != 2:
+        maillog = logging.handlers.SMTPHandler((op.smtpserver, op.smtpport), op.smtpfrom, op.smtpto, 'pzman: ERROR at {0}'.format(mailsubject))
+        # uncomment if mta requires authentication                                       
+        #maillog = logging.handlers.SMTPHandler(('localhost','25'),\
+        #                                       'user@example.com', 'user@example.com', 'pzman: ERROR at {0}'.format(mailsubject), ('user@example.com','password'))
+        maillog.setLevel(logging.ERROR)
+        maillog.setFormatter(formatter)
+        logger.addHandler(maillog)
+    # log the messages
+    if op.log == True:
+        if level == 'info':
+            if printlog:
+                print msg
+            logger.info(msg)
+        if level == 'warn':
+            if printlog:
+                print msg
+            logger.warn(msg)
+        if level == 'error':
+            if printlog:
+                print msg
+            logger.error(msg)
+    return
+
+    
+def findpools(pooltofind='', remotehost=False):
+    '''checks and makes sure pool exist before doing anything'''
+    try:
+        if remotehost == True:
+            ## to find pools on a remote host
+            sshcmd = op.ssh[:]
+            zfslist = ['zpool', 'list', '-H', '-o', 'name']
+            for c in zfslist:
+                sshcmd.append(c)
+            zfscmd = sshcmd
+        else:
+            ## to find pools on the localhost
+            zfscmd = ['zpool', 'list', '-H', '-o', 'name']
+        ## zout remains the same
+        zout = subprocess.Popen(zfscmd, universal_newlines=True, stderr=open(os.devnull), stdout=subprocess.PIPE).communicate()
+    except OSError as e:
+        logger('execution failed: {0}'.format(e), 'error', 'findpools')
+        sys.exit(1)
+    pools = zout[0].split('\n')[:-1]
+    ## if any specific pool is asked then return true if exists, else not
+    if pooltofind:
+        if pooltofind in pools:
+            if remotehost:
+                logger('finding pool {0} on {1}'.format(pooltofind, op.host))
+            else:
+                logger('finding pool {0} on localhost'.format(pooltofind))
+            return True
+        else:
+            if remotehost:
+                logger('could not find pool {0} on {1}, perhaps you need to manually send initial replication stream with "zfs send -Rv"'.format(pooltofind, op.host), 'error', 'findpools')
+            else:
+                logger('could not find pool {0}'.format(pooltofind), 'error', 'findpools')
+            return False
+    ## if asked for all pools list then give it out
+    elif not pooltofind:
+        logger('getting pools list')
+        return pools
+
+
+def meetconditions():
+    '''checks ssh connectivity, verifies time synchronization and finds mbuffer'''
+    funcname = 'checkprereqs'
+    remotessh = op.ssh[:]
+    remotembuffer = op.ssh[:]
+    remotessh.append('date')
+    remotessh.append('+%Y-%m-%dT%H:%M')
+    remotembuffer.append('mbuffer')
+    remotembuffer.append('-h')
+    # compile the cmds
+    remotesshcmd = remotessh
+    mbuffercmd = ['mbuffer', '-h']
+    remotembuffercmd = remotembuffer
+    prereqs = [mbuffercmd, remotesshcmd, remotembuffercmd]
+    for prereq in prereqs:
+        with tempfile.NamedTemporaryFile() as tmpfile:
+            try:
+                cmd = prereq
+                #print "running cmd: {0}".format(cmd)
+                output = subprocess.Popen(cmd, universal_newlines=True, stderr=tmpfile, stdout=subprocess.PIPE).communicate()
+                #print "output is: {0}".format(output)
+                tmpfile.seek(0)
+            except:
+                logger('cannot find ssh or mbuffer, make sure to install these on both hosts', 'error', funcname)
+                sys.exit(1)
+            ## checking if mbuffer exists locally
+            if 'mbuffer' and not 'ssh' in cmd:
+                if op.usembuffer:
+                    if not output[0]:
+                        tmpfile.seek(0)
+                        if 'usage: mbuffer' in tmpfile.read():
+                            logger('checking mbuffer on localhost')
+            ## checking remote host's ssh
+            elif 'ssh' and 'date' in cmd:
+                if output:
+                    if not str(op.timeobj.year) in output[0]:
+                        logger('cannot run test command on {0} over ssh, make sure to setup ssh key auth and verify connection; full error:\n{1}'.format(op.host, tmpfile.read()), 'error', funcname)
+                        sys.exit(1)
+                    else:
+                        logger('checking ssh access on {0}'.format(op.host))
+                else:
+                    logger('cannot connect to {0}, verify connection and setup ssh'.format(op.host), 'error', funcname)
+                    #logger('cannot connect to {0}, verify connection and setup ssh; full error:\n {1}'.format(self.host, tmpfile.read()), 'error', funcname)
+                    sys.exit(1)
+            ## check mbuffer exists on remote host
+            elif 'ssh' and 'mbuffer' in cmd:
+                if op.usembuffer:
+                    if not output[0]:
+                        tmpfile.seek(0)
+                        if 'usage: mbuffer' in tmpfile.read():
+                            logger('checking mbuffer on {0}'.format(op.host))                            
+                        else:
+                            logger('cannot find mbuffer at {0}, make sure to install it on both hosts'.format(op.host), 'error', funcname)
+                            sys.exit(1)
+                    else:
+                        print 'ssh/mbuffer output true, output is: {0}'.format(output)
+    return
+
+
+def checksize():
+    '''go, get the pools capacity'''
+    if not findpools():
+        sys.exit(1)
+    try:
+        zfscmd = ['zpool', 'list', '-H', '-o', 'name,capacity']
+        zout = subprocess.Popen(zfscmd, universal_newlines=True, stderr=open(os.devnull), stdout=subprocess.PIPE).communicate()
+    except OSError as e:
+        logger('execution failed: {0}'.format(e), 'error', 'checksize')
+        sys.exit(1)
+    ## make dictionary out of the output
+    k = []
+    v = []
+    for capacity in zout:
+        if capacity:
+            for n, o in enumerate(capacity.strip('\n').strip('%').split('\t')):
+                if n % 2 == 0:
+                    k.append(o)
+                else:
+                    v.append(o)
+    d = dict(zip(k, v))
+    ## check and notify
+    for poolname in d.keys():
+        if int(d[poolname]) < int(op.capacitythreshold):
+            logger('checking pool size for {0}'.format(poolname))
+            return True
+        else:
+            logger('pool {0} running out of space'.format(poolname), 'error', 'checksize')
+            return False
+                    
+
+def monitorhealth():
+    '''go, get the pool monitor status'''
+    if not findpools():
+        sys.exit(1)
+    try:
+        zfscmd = ['zpool', 'status', '-x']
+        pools = subprocess.Popen(zfscmd, universal_newlines=True, stderr=open(os.devnull), stdout=subprocess.PIPE).communicate()
+    except OSError as e:
+        logger('execution failed: {0}'.format(e), 'error', 'monitorhealth')
+        sys.exit(1)        
+    if 'all pools are healthy' in pools[0]:
+        logger('monitoring pools health status')
+        return True
+    else:
+        logger('pool(s) un-healthy', 'error', 'monitorhealth')
+        return False
+
+
+def snapshots(poolname, remotehost=False, createsnap=False, listsnaps=True):
+    '''list snapshots locally and for remote host, returns a list'''
+    funcname = 'snapshots'
+    try:
+        ## making the cmds
+        if listsnaps:
+            zfscmd = ['zfs', 'list', '-t', 'snapshot', '-H', '-o', 'name', '-s', 'name']
+        elif createsnap:
+            snapname = '{0}@{1}-{2}'.format(poolname, op.snapprefix, op.time)
+            zfscmd = ['zfs', 'snapshot', '-r', snapname]
+        if remotehost:
+            sshcmd = op.ssh[:]
+            for c in zfscmd:
+                sshcmd.append(c)
+            zfscmd = sshcmd
+
+        ## create subprocesses
+        if listsnaps:
+            output = subprocess.Popen(zfscmd, universal_newlines=True, stderr=open(os.devnull), stdout=subprocess.PIPE).communicate()
+            snapshots = re.findall(poolname+'@incremental-.*', output[0])
+            snapshots.sort()
+        elif createsnap:
+            output = subprocess.Popen(zfscmd, universal_newlines=True, stderr=open(os.devnull), stdout=open(os.devnull))
+    except OSError as e:
+        logger('zfs command not found, is zfs installed?: {0}'.format(e), 'error', funcname)
+        sys.exit(1)
+
+    ## checking output
+    if listsnaps:
+        if output[0]:
+            ## may be, someday, convert all host determination to lambda
+            whichhost=lambda x: op.host if remotehost else op.localhost
+            logger('pulling all snapshots list on {0}'.format(whichhost(remotehost)))
+            #logger('pulling all snapshots')
+            if snapshots:
+                if remotehost:
+                    logger('finding incremental snapshots on {0}'.format(op.host))
+                else:
+                    logger('finding incremental snapshots on localhost')
+                return snapshots
+            else:
+                if remotehost:
+                    logger('snapshots exist but no incremental snapshots found for given pool on {0}'.format(op.host))
+                else:
+                    logger('snapshots exist but no incremental snapshots found for given pool on localhost')
+                return False
+        else:
+            if remotehost:
+                logger('no snapshots found for requested pool on {0}'.format(op.host))            
+            else:
+                logger('no snapshots found for requested pool on localhost')
+            return False
+    elif createsnap:
+        if remotehost:
+            logger('creating snapshot {0} on {1}'.format(snapname, op.host))
+        else:
+            logger('creating snapshot {0} on localhost'.format(snapname))
+        return 
+        
+        
+class Replicate():
+    '''class for remote stuff; compares, computes incremental pool snapshots and sends their replication streams'''
+    def __init__(self, poolname, host):
+        self.poolname = poolname
+        self.host = host
+        self.time = op.time
+        self.allsnapshots = {}
+        self.diffsnapshots = []
+        self.samesnapshots = []
+        self.incrementfrom = ''
+        self.incrementto = ''
+        self.success = ''
+        self.error = ''
+        ## time deltas
+        self.locallisttime = datetime.timedelta(0)
+        self.remotelisttime = datetime.timedelta(0)
+        self.computetime = datetime.timedelta(0)
+        self.sendtime = datetime.timedelta(0)
+        self.totaltimespent = datetime.timedelta(0)
+        
+    def initialpoolsetup(self):
+        '''method checks remote pool, finds if initial pool setup is needed; refers to findpools function'''    
+        if not findpools(self.poolname, remotehost=True):
+            sys.exit(1)
+
+    def listsnapshots(self, remotehost=False):
+        '''returns a dict for latest local and remote snapshots; linked to snapshots function'''
+        stime = datetime.datetime.now()
+        if not remotehost:
+            localsnapshots = snapshots(self.poolname, remotehost=False, listsnaps=True, createsnap=False)
+            if localsnapshots:
+                self.allsnapshots['local'] = localsnapshots
+                etime = datetime.datetime.now()
+                self.locallisttime = etime-stime
+                return True
+            else:
+                return False
+        if remotehost:
+            remotesnapshots = snapshots(self.poolname, remotehost=True, listsnaps=True, createsnap=False)        
+            if remotesnapshots:
+                self.allsnapshots['remote'] = remotesnapshots
+                etime = datetime.datetime.now()
+                self.remotelisttime = etime-stime
+            else:
+                return False
+        
+    def computestream(self):
+        '''method to diff and compute increments between snapshots to send'''
+        stime = datetime.datetime.now()
+        localsnapshots = self.allsnapshots['local']
+        remotesnapshots = self.allsnapshots['remote']
+        self.diffsnapshots = []
+        for i in localsnapshots:
+            if i not in remotesnapshots:
+                self.diffsnapshots.append(i)
+        for i in localsnapshots:
+            if i in remotesnapshots:
+                self.samesnapshots.append(i)
+
+        ## finding the two snapshots for 'zfs send -IR'
+        if self.diffsnapshots:
+            logger('found {0} incremental snapshots to be sent over to {1}'.format(len(self.diffsnapshots), self.host))
+            self.incrementfrom = self.samesnapshots[-1]
+            self.incrementto = self.diffsnapshots[-1]
+            etime = datetime.datetime.now()
+            self.computetime = etime-stime
+            return True
+        else:
+            logger('found 0 incremental snapshots to be sent')
+            etime = datetime.datetime.now()
+            self.computetime = etime-stime
+            return False
+        
+    def sendstream(self, firstrep=False):
+        '''method to send needed incremental replica stream or single snapshot stream for initial replication'''
+        stime = datetime.datetime.now()
+        funcname = 'sendstream'
+        ## if it is a first replication
+        if firstrep:
+            self.incrementfrom = 'initial replication'
+            self.incrementto = self.allsnapshots['local'][0]
+        ## getting rid of zombie processes so progress bar can function
+        signal.signal(signal.SIGCHLD, signal.SIG_IGN)    
+        ## subfunction to check if process is running
+        def checkprocess(x):
+            try:
+                os.kill(x, 0)
+                return True
+            except OSError:
+                return False
+        ## start the send process
+        if not self.incrementto and not self.incrementfrom:
+            logger('both localhost and {0} are in sync'.format(self.host))
+        else:
+            logger('preparing increment between {0} and {1}'.format(self.incrementfrom, self.incrementto))
+            ## if it is a first replication
+            if firstrep:
+                zfssend = ['zfs', 'send', '-R', self.allsnapshots['local'][0]]
+            else:
+                zfssend = ['zfs', 'send', '-R', '-I', self.incrementfrom, self.incrementto]
+            mbuffer = ['mbuffer', '-q', '-v', '0', '-m', op.mbufferram]
+            sshcmd = op.ssh[:]
+            zfsrecv = ['zfs', 'receive', '-F', self.poolname]
+            for i in zfsrecv:
+                sshcmd.append(i)
+            with tempfile.NamedTemporaryFile() as tmpfile:
+                ## the subprocess commands    
+                try:
+                    if not op.usembuffer:
+                        logger('mbuffer disabled, using ssh to send replication stream')
+                        output = subprocess.Popen(zfssend, stdout=subprocess.PIPE, stderr=tmpfile)
+                        pipe1 = subprocess.Popen(sshcmd, stdin=output.stdout, stderr=tmpfile)
+                    else:
+                        logger('mbuffer enabled')
+                        output = subprocess.Popen(zfssend, stdout=subprocess.PIPE, stderr=tmpfile)
+                        pipe1 = subprocess.Popen(mbuffer, stdin=output.stdout, stdout=subprocess.PIPE)
+                        pipe2 = subprocess.Popen(sshcmd, stdin=pipe1.stdout, stdout=tmpfile, stderr=tmpfile)
+                    sys.stdout.write('sending')
+                except OSError as e:
+                    logger('zfs send failed, either ssh or zfs or mbuffer died in process or not found', 'error', procname)
+                tmpfile.seek(0)
+                errors = tmpfile.readlines()
+                ## brief progress bar
+                while True:
+                    if checkprocess(pipe1.pid):
+                        time.sleep(1)
+                        sys.stdout.write('.')
+                        sys.stdout.flush()
+                    else:
+                        etime = datetime.datetime.now()
+                        self.sendtime = etime-stime
+                        print 'done'
+                        break
+                ## error handling
+                ## seek again, go back to 0 byte and call the variable again
+                tmpfile.seek(0)
+                errors = tmpfile.readlines()
+
+                if errors:
+                    self.success = False
+                    for i in errors:
+                        if 'destination has snapshots' in i:
+                            self.error = 'preexisting snaps'
+                            logger('cannot send stream, destination has preexisting snapshots, you must destroy them to start sending a new full replication stream\nfull error:\n{0}'\
+                                   .format(' '.join(errors)), 'error', funcname)
+                            return False
+                        ## may not be needed since we already use '-F' at receiving side for a rollback
+                        elif 'modified' in i:
+                            self.error = 'destination modified'
+                            logger('could not send stream, destination fs or zvol has been modified; perhaps it is a good idea to set readonly on {0} at {1}\nfull error:\n{2}'\
+                                   .format(self.poolname, self.host, ' '.join(errors)), 'error', funcname)
+                        else:
+                            self.error = 'see syslog'
+                            logger('cannot send replication stream, unknown exception\nfull error\n: {0}'.format(' '.join(errors)), 'error', funcname)
+                else:
+                    self.success = True
+                    if not self.sendtime:
+                        etime = datetime.datetime.now()
+                        self.sendtime = etime-stime
+                    return True
+        
+    def createsnapshot(self):
+        '''creates a snapshot, linked to snapshots function'''
+        snapshots(self.poolname, remotehost=False, createsnap=True, listsnaps=False)
+        return
+
+    def rotatesnapshots(self, remotehost=False):
+        '''finds local and remote snapshots older than snapkeep and removes them'''
+        global whichhost
+        whichhost=lambda x: op.host if remotehost else op.localhost
+        
+        def deletesnapshot(snapshotfrom, snapshotto, remotehost=remotehost):
+            '''subfunction to actually delete snapshot'''
+            funcname = 'deletesnapshot'
+            snapshottoname = snapshotto.strip('{0}@'.format(self.poolname))
+
+            ## user protection
+            if '@' not in snapshotfrom:
+                logger('zfs destroy requested for something that is not a snapshot, aborting', 'error', funcname)
+            else:
+                zfscmd = ['zfs', 'destroy', '-R', '{0}%{1}'.format(snapshotfrom, snapshottoname)]
+                if remotehost:
+                    sshcmd = op.ssh[:]
+                    for i in zfscmd:
+                        sshcmd.append(i)
+                        zfscmd = sshcmd
+                try:
+                    with tempfile.NamedTemporaryFile() as tmpfile:        
+                        output = subprocess.Popen(zfscmd, stdout=tmpfile, stderr=tmpfile)
+                        tmpfile.seek(0)
+                        if not tmpfile.readlines():
+                            logger('recursively rotated snapshots older than {0} on {1}'.format(snapshotto, whichhost(remotehost)))
+                            return True
+                        else:
+                            logger('errors ecountered during snapshot rotation on {0}'.format(whichhost(remotehost)), 'error', funcname)
+                            return False
+                except OSError:
+                    logger('zfs deletion error, is zfs installed?', 'error', funcname)
+                    return False
+                    
+        localsnapshots = self.allsnapshots['local']
+        remotesnapshots = self.allsnapshots['remote']
+        if len(localsnapshots) > op.snapkeep:
+            localdestroyfrom = localsnapshots[:-op.snapkeep][0]
+            if not remotehost:
+                logger('found {0} snapshots to be rotated on localhost'.format(len(localsnapshots)-op.snapkeep))
+                deletesnapshot(localsnapshots[:-op.snapkeep][0], localsnapshots[:-op.snapkeep][-1])
+            else:
+                ## needed on ZOL since it does not destory snapshots that does not exist on sending side
+                ## see ZOL bug# 1253: https://github.com/zfsonlinux/zfs/issues/1253
+                logger('found {0} snapshots to be rotated on {1}'.format(len(localsnapshots)-op.snapkeep, self.host))
+                deletesnapshot(remotesnapshots[:-op.snapkeep][0], remotesnapshots[:-op.snapkeep][-1])
+        else:
+            logger('0 snapshots to be rotated on {0}'.format(whichhost(remotehost)))
+        return
+
+    def totaltime(self):
+        '''method to find total time consumed on local and remote listing along with compute and send stram'''
+        self.totaltimespent = self.locallisttime + self.remotelisttime + self.computetime + self.sendtime
+        return self.totaltimespent
+            
+        
+def bzman(inst, pool, host):
+    '''creates Replicate instances, handles stream sending layout and records to shelve objects'''
+    meetconditions()
+    findpools(pool)
+    global instname
+    instname = inst
+    ## quirk to create a Replicate instance by unix timestamp as variable name
+    instname = Replicate(pool, host)
+    instname.initialpoolsetup()
+    if not instname.listsnapshots(remotehost=False) and not instname.listsnapshots(remotehost=True):
+        logger('assuming the very first full pool replication ...')
+        instname.createsnapshot()
+        instname.listsnapshots()
+        instname.sendstream(firstrep=True)
+        logger('incremental replication will resume on the next run, see ya soon!')
+    else:
+        instname.listsnapshots(remotehost=False)
+        instname.listsnapshots(remotehost=True)
+        instname.computestream()
+        instname.sendstream()
+        instname.createsnapshot()
+        instname.rotatesnapshots(remotehost=False)
+        instname.rotatesnapshots(remotehost=True)
+    # compute total execution time for the first time
+    logger('time taken: to list local {0}, list remote {1}, compute {2} and send {3} totalling as {4}'.\
+           format(str(instname.locallisttime), str(instname.remotelisttime), str(instname.computetime), str(instname.sendtime),\
+                  str(instname.totaltime())), printlog=False)
+    print 'time taken to: '
+    print '{0:<22}: {1:>22}\n{2:<22}: {3:>22}\n{4:<22}: {5:>22}\n{6:<22}: {7:>22}'.\
+        format('  list local snap',str(instname.locallisttime), '  list remote snap',str(instname.remotelisttime), '  compute stream',str(instname.computetime), '  send stream',str(instname.sendtime))
+    print '  ---------------------------------------------'
+    # then just grab the value
+    print '{0:<22}: {1:>22}'.format('  total time',instname.totaltimespent)
+    return
+
+    
+def updatedb():
+    try:
+        db = shelve.open('bzman.db')
+        db[op.dbtime] = instname
+        logger('logging replication details into the database')
+    finally:
+        db.close()
+    return
+    
+
+def replicareport(htmlformat=False):
+    '''print the basic replication report'''
+ 
+    ## python2 does not allow default args after varargs
+    def returnrow(*columns, **d):
+        '''returns a new formatted row'''
+        row = '{0:<7} {1:<34} {2:<8} {3:<16} {4:<20}'.format(*columns)
+        if d['htmlformat']:
+            row = '<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td></tr>'.format(*columns)
+        return row
+    try:
+        db = shelve.open('bzman.db')
+        textreport = []
+        htmlreport = []
+        ## only print when html report is not requested
+        if not htmlformat:
+            print returnrow('host', 'increment from', '...to', 'time consumed', 'result', htmlformat=False)
+            print '---------------------------------------------------------------------------------'
+        keys = db.keys()
+        if htmlformat:
+            keys = keys[-145:]
+        keys.sort()
+        for k in keys:
+            v = db[k]
+            ## print result
+            if v.success:
+                result = 'success'
+            else:
+                result = v.error
+            ## print '--' for blank values
+            if not v.host:
+                v.host = '--'
+            ## strip similar characters off incrementto, we don't want to repeat ourselves or crank up bulky reports    
+            if not v.incrementfrom:
+                v.incrementfrom = '--'
+            else:
+                v.incrementto = v.incrementto[-6:]
+            if not v.incrementto:
+                v.incrementto = '--'
+            if not result:
+                result = '--'
+            if not v.totaltimespent:
+                v.totaltimespent = '--'    
+            ## handling for html
+            if htmlformat:
+                htmlreport.append(returnrow(v.host, v.incrementfrom, v.incrementto, str(v.totaltimespent), result, htmlformat=True))
+                textreport.append(returnrow(v.host, v.incrementfrom, v.incrementto, str(v.totaltimespent), result, htmlformat=False))
+            else:
+                print returnrow(v.host, v.incrementfrom, v.incrementto, str(v.totaltimespent), result, htmlformat=False)
+    finally:
+        db.close()
+    if htmlformat:
+        return textreport, htmlreport
+    else:
+        return
+
+        
+def mailreport(mailto):
+    '''send html report to the user'''
+    tbody = replicareport(htmlformat=True)[1] 
+    total = len(tbody)
+    successes = sum([row.count('success') for row in tbody if 'success' in row])
+    failures = total - successes
+    logger('generating html replication report')
+    ## prepare mail headers
+    em = MIMEMultipart('alternative')
+    em['From'] = op.smtpfrom
+    em['To'] = mailto
+    em['Subject'] = '{0}: Daily Replication Report'.format(op.localhost.title())
+    ## prepare the contents
+    htmlreport = '''
+    <html>
+      <head></head>
+      <body>
+            <div align="center">
+              <h1><u> Replication Report as of {0} on {1}</u></h1>
+              <em>=> {2} failures in {3} total ZFS replications during last 24 hours</em><br><br>
+            </div>
+        <div align="center">
+          <table align="center" border="1px">
+            <thead align="left">
+              <tr>
+                <th>Host</th><th>Increment From</th><th>Increment To</th><th>Time Spent</th><th>Result</th>
+              </tr>
+            </thead>
+            <tbody align="left">
+              {4}
+            </tbody>
+          </table>
+        </div>
+      </body>
+    </html>
+    '''.format(op.timeobj.ctime(), op.localhost.title(), failures, total, '\n'.join(tbody))
+    textreport = ''.join(replicareport(htmlformat=True)[0])
+    ## define mimetext objects and attach them
+    textpart = MIMEText(textreport, 'plain')
+    htmlpart = MIMEText(htmlreport, 'html')
+    #em.attach(textpart)
+    em.attach(htmlpart)
+    ## send it
+    try:
+        server = smtplib.SMTP(op.smtpserver, op.smtpport)
+        server.sendmail(op.smtpfrom, mailto, em.as_string())
+        logger('mail sent to {0}'.format(mailto))
+    except smtplib.SMTPException as e:
+        print 'html report could not be sent', e
+    return
+
+    
+def main():
+    '''runs the main prog'''
+    global op
+    op = Options(sys.argv[1:])
+    try:
+        if op.checksize:
+            checksize()
+
+        if op.monitorpool:
+            monitorhealth()
+
+        if op.send:
+            try:
+                timestamp = 'ts{0}'.format(op.dbtime)    
+                bzman(timestamp, op.poolname, op.host)
+            finally:
+                updatedb()    
+
+        if op.printreport:
+            replicareport()
+
+        if op.sendreport:
+            mailreport(op.reportto)
+ 
+    except KeyboardInterrupt:
+        sys.exit(1)
+    return
+
+        
+if __name__ == '__main__':
+        main()        
+
