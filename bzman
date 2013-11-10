@@ -1,18 +1,6 @@
-#!/usr/bin/env python2
-
-
-### This program is free software; you can redistribute it and/or
-### modify it under the terms of the GNU General Public License
-### as published by the Free Software Foundation; either version 2
-### of the License, or (at your option) any later version.
-###
-### This program is distributed in the hope that it will be useful,
-### but WITHOUT ANY WARRANTY; without even the implied warranty of
-### MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-### GNU General Public License for more details.
-###
-### Written by: Bassu
-
+#!/usr/bin/python
+# tool to monitor, report and send incremental backups
+# by: bassu@phi9.com
 
 import os
 import re
@@ -666,9 +654,9 @@ def replicareport(htmlformat=False):
             print returnrow('host', 'increment from', '...to', 'time consumed', 'result', htmlformat=False)
             print '---------------------------------------------------------------------------------'
         keys = db.keys()
+        keys.sort()
         if htmlformat:
             keys = keys[-145:]
-        keys.sort()
         for k in keys:
             v = db[k]
             ## print result
@@ -696,7 +684,9 @@ def replicareport(htmlformat=False):
                 textreport.append(returnrow(v.host, v.incrementfrom, v.incrementto, str(v.totaltimespent), result, htmlformat=False))
             else:
                 print returnrow(v.host, v.incrementfrom, v.incrementto, str(v.totaltimespent), result, htmlformat=False)
+                sys.stdout.flush()
     finally:
+        sys.stdout.flush()
         db.close()
     if htmlformat:
         return textreport, htmlreport
@@ -782,6 +772,8 @@ def main():
  
     except KeyboardInterrupt:
         sys.exit(1)
+    finally:
+        sys.stdout.flush()
     return
 
         
