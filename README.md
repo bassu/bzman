@@ -9,7 +9,8 @@ Bassu's ZFS (replication) Manager
 One of the main powerful features of ZFS is pool-wide incremental replication. That means you can maintain a hotcopy of your current pool for distaster recovery or for backup purposes. But since I didn't find any tool that reliably automated replication streams while keeping their record so I decided to write one.
 
 Whatever may be the reason, you may want (or will have) a near-instant copy of your pool that is to least 10 minutes behind the original pool -- all the time.
-*And that's what **bzman** is here for!*
+
+*And that's what bzman is here for!*
 
 On the plus side, it also monitors pool health status and usage capacity as well. 
 
