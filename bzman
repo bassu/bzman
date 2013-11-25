@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # tool to monitor, report and send incremental backups
 # by: bassu@phi9.com
 
@@ -8,11 +8,13 @@ import sys
 import time
 import getopt
 import signal
+import syslog
 import shelve
 import smtplib
 import datetime
 import tempfile
 import subprocess
+import traceback
 from platform import node
 import logging, logging.handlers
 from email.mime.text import MIMEText
@@ -29,6 +31,9 @@ class Options():
         self.reportto = 'root'
         self.host = None
         self.send = False
+	self.senddataset = False
+        self.dataset = None
+        self.datasetpath = None
 
         ## defaults
         self.log = True
@@ -50,7 +55,7 @@ class Options():
         self.localhost = node().split('.')[0]
         ## parse the opts and their values
         try:
-            opts, args = getopt.getopt(cmdline, 'mchps:r:', ['help'])
+            opts, args = getopt.getopt(cmdline, 'mchps:r:d:', ['help'])
             for opt, value  in opts:
                 if opt == '-m':
                     self.monitorpool = True
@@ -64,6 +69,20 @@ class Options():
                 if opt == '-s':
                     self.send = True
                     self.poolname = value
+                if opt == '-d':
+                    ## error check on dataset name format    
+                    inputpath = value.split('/')
+                    if len(inputpath) == 2:
+                        self.send = True
+			self.senddataset = True
+                        self.dataset = inputpath[1]
+                        self.datasetpath = value
+                        ## a dirty hack of what becomes the new pool name
+                        self.poolname = self.datasetpath
+                    else:
+                        print "invalid format for zvol or filesystem"
+                        self.usage()
+                        sys.exit(1)
                 if opt in ('-h', '--help'):
                     self.usage()
                     sys.exit(0)
@@ -75,7 +94,7 @@ class Options():
         if self.send == True:     
            if args:
                self.host = args[0]
-               self.ssh = ['ssh', '-T', '-c', 'arcfour', '-o', 'Compression=no', '-x', '-p1998', self.host, '--']        
+               self.ssh = ['ssh', '-T', '-c', 'arcfour', '-o', 'Compression=no', '-x', '-p22', self.host, '--']
            else:
                print "bzman: you must specify the host to send the zfs stream to!"
                print "see -h for options"
@@ -87,39 +106,47 @@ class Options():
         print "bzman - ZFS managing tool to monitor health, check free space, report,"
         print "compute and send auto incremental ZFS pool replication streams"
         print '''
-    Options:
-    -m                  monitors health status of ZFS pools and
-                        sends error email if unhealthy
+Options:
+-m                  monitors health status of ZFS pools and
+                    sends error email if unhealthy
 
-    -c                  checks free size of ZFS pools and
-                        sends an email if it's less than 25%
+-c                  checks free size of ZFS pools and
+                    sends an email if it's less than 25%
 
-    -s [pool] [host]    sends datasets/zvols in ZFS [pool] to same
-                        [pool] on host via fast arcfour SSH or mbuffer
+-s [pool] [host]    sends a complete ZFS [pool] to same [pool]
+                    on [host] via fast arcfour SSH or mbuffer
 
-    -p                  print the daily report of incremental snapshots
-                        streams, looks kinda like a replication log
+-d [pool]/[dataset] [host]    
 
-    -r [to]             sends immediate daily report of incremental streams 
-                        to [to] recipient
+                    sends a particular ZFS [dataset], whether of type zvol or 
+                    filesystem to same [pool] on [host] via fast arcfour SSH
 
-    -h|--help           show this help menu
+-p                  print the daily report of incremental snapshots
+                    streams, looks kinda like a replication log
 
-    Defaults: 
-    - Error/report emails are sent to root (changeable in /etc/aliases).
-    - Daily report is sent at midnight.
-    - Initial replication is automatic, destination pool with same name must exist.
-    - All info and error messages are also logged to syslog.
-    - Incremental backup time is assumed at 10 mins (cron to be setup with).
-    - Snapshots are prefixed 'incremental' and kept for a week i.e. 3*24*7
-    - Destination pool name is chosen based on source pool name and will 
-      fail if it doesn't exit. 
-    '''
+-r [to]             sends immediate daily HTML report of incremental streams 
+                    to [to] recipient email address
+
+-h|--help           show this help menu
+
+Defaults: 
+- Error/report emails are sent to root (changeable in /etc/aliases).
+- Initial replication is automatic, destination pool with same name must exist.
+- All info and error messages are also logged to syslog.
+- Incremental backup time is assumed at 10 mins (cron to be setup with).
+- Snapshots are prefixed 'incremental' and kept for a week i.e. 3*24*7
+- Destination pool name is chosen based on source pool name and will 
+  fail if it doesn't exit. 
+'''
         return
 
         
 def logger(msg, level='info', mailsubject='', printlog=True):
     '''logs info/error messages to syslog and errors to smtp logging handlers'''
+    islinux=lambda: True if sys.platform.startswith("linux") else False
+    issolaris=lambda: True if sys.platform.startswith("sunos") else False
+    isotherunix=lambda: True if sys.platform.startswith("freebsd" or "darwin" or "netbsd") else False
+
     # initialize a logger, set level and format
     logging.raiseExceptions = False
     logger = logging.getLogger('bzman_logger')
@@ -130,46 +157,57 @@ def logger(msg, level='info', mailsubject='', printlog=True):
     if not getattr(logger, 'handlers', None):
         # add a syslog handler with local unix socket and syslog facility
         # or else messages of type level 'error' won't log at all  ;)
-        syslog = logging.handlers.SysLogHandler('/dev/log', 'syslog')
-        syslog.setLevel(logging.DEBUG)
-        syslog.setFormatter(formatter)
-        logger.addHandler(syslog)
+        if islinux(): syslogger = logging.handlers.SysLogHandler('/dev/log', 'syslog')
+	# ironically unix does not treat /dev/log as unix sockets so we use standard udp addreses here
+	elif isotherunix(): syslogger = logging.handlers.SysLogHandler(facility='local1')
+	else: syslogger = logging.handlers.SysLogHandler()
+	syslogger.setLevel(logging.DEBUG)
+        syslogger.setFormatter(formatter)
+        logger.addHandler(syslogger)
+
     # now the conditional smtp logger handler; and only once
     if level == 'error' and len(getattr(logger, 'handlers', None)) != 2:
         maillog = logging.handlers.SMTPHandler((op.smtpserver, op.smtpport), op.smtpfrom, op.smtpto, 'pzman: ERROR at {0}'.format(mailsubject))
         # uncomment if mta requires authentication                                       
-        #maillog = logging.handlers.SMTPHandler(('localhost','25'),\
-        #                                       'user@example.com', 'user@example.com', 'pzman: ERROR at {0}'.format(mailsubject), ('user@example.com','password'))
+        # maillog = logging.handlers.SMTPHandler(('localhost','25'),\
+        #                                       'from@example.com', 'to@example.com', 'pzman: ERROR at {0}'.format(mailsubject),\
+        #                                       ('user@example.com','password'))
         maillog.setLevel(logging.ERROR)
         maillog.setFormatter(formatter)
         logger.addHandler(maillog)
-    # log the messages
+
+    # log the messages, smartos needs special treatment via C syslog since default unix sockets 
+    # don't work on unixes for /dev/log and smartos doesn't listen to default 514 udp port either
     if op.log == True:
         if level == 'info':
-            if printlog:
-                print msg
+            if printlog: print msg
+	    if issolaris(): syslog.syslog(syslog.LOG_NOTICE | syslog.LOG_DAEMON, msg)
             logger.info(msg)
         if level == 'warn':
-            if printlog:
-                print msg
+            if printlog: print msg
+	    if issolaris(): syslog.syslog(syslog.LOG_ERR | syslog.LOG_DAEMON, msg)
             logger.warn(msg)
         if level == 'error':
-            if printlog:
-                print msg
+            if printlog: print msg
+	    if issolaris(): syslog.syslog(syslog.LOG_ERR | syslog.LOG_DAEMON, msg)
             logger.error(msg)
     return
 
     
-def findpools(pooltofind='', remotehost=False):
+def findpools(pooltofind='', remotehost=False, dataset=False):
     '''checks and makes sure pool exist before doing anything'''
+    whichhost=lambda x: op.host if remotehost else op.localhost
     try:
-        if remotehost == True:
+        if remotehost:
             ## to find pools on a remote host
             sshcmd = op.ssh[:]
             zfslist = ['zpool', 'list', '-H', '-o', 'name']
             for c in zfslist:
                 sshcmd.append(c)
             zfscmd = sshcmd
+        elif dataset:
+            ## to find a dataset on the localhost
+            zfscmd = ['zfs', 'list', '-H', '-o', 'name', op.datasetpath]
         else:
             ## to find pools on the localhost
             zfscmd = ['zpool', 'list', '-H', '-o', 'name']
@@ -182,23 +220,26 @@ def findpools(pooltofind='', remotehost=False):
     ## if any specific pool is asked then return true if exists, else not
     if pooltofind:
         if pooltofind in pools:
-            if remotehost:
-                logger('finding pool {0} on {1}'.format(pooltofind, op.host))
-            else:
-                logger('finding pool {0} on localhost'.format(pooltofind))
+            logger('finding pool {0} on {1}'.format(pooltofind, whichhost(remotehost)))
             return True
         else:
-            if remotehost:
-                logger('could not find pool {0} on {1}, perhaps you need to manually send initial replication stream with "zfs send -Rv"'.format(pooltofind, op.host), 'error', 'findpools')
-            else:
-                logger('could not find pool {0}'.format(pooltofind), 'error', 'findpools')
+            logger('could not find pool {0} on {1}, perhaps you need to manually send initial replication stream with "zfs send -Rv"'.format(pooltofind, whichhost(remotehost)), 'error', 'findpools')
+            return False
+    ## if asked for the dataset
+    elif dataset:
+	print "running findpools on dataset"
+        if op.datasetpath in pools:
+            logger('finding dataset {0} on {1}'.format(op.datasetpath, whichhost(remotehost)))
+            return True
+        else:
+            logger('could not find dataset {0} on {1}'.format(op.datasetpath, whichhost(remotehost)))
             return False
     ## if asked for all pools list then give it out
     elif not pooltofind:
         logger('getting pools list')
         return pools
 
-
+        
 def meetconditions():
     '''checks ssh connectivity, verifies time synchronization and finds mbuffer'''
     funcname = 'checkprereqs'
@@ -212,7 +253,8 @@ def meetconditions():
     remotesshcmd = remotessh
     mbuffercmd = ['mbuffer', '-h']
     remotembuffercmd = remotembuffer
-    prereqs = [mbuffercmd, remotesshcmd, remotembuffercmd]
+    if op.usembuffer: prereqs = (buffercmd, remotesshcmd, remotembuffercmd)
+    else: prereqs = (remotesshcmd, )
     for prereq in prereqs:
         with tempfile.NamedTemporaryFile() as tmpfile:
             try:
@@ -223,6 +265,7 @@ def meetconditions():
                 tmpfile.seek(0)
             except:
                 logger('cannot find ssh or mbuffer, make sure to install these on both hosts', 'error', funcname)
+		sys.exc_info()[1]
                 sys.exit(1)
             ## checking if mbuffer exists locally
             if 'mbuffer' and not 'ssh' in cmd:
@@ -307,7 +350,7 @@ def monitorhealth():
         return False
 
 
-def snapshots(poolname, remotehost=False, createsnap=False, listsnaps=True):
+def snapshots(poolname, remotehost=False, createsnap=False, listsnaps=True, log=True):
     '''list snapshots locally and for remote host, returns a list'''
     funcname = 'snapshots'
     try:
@@ -339,32 +382,25 @@ def snapshots(poolname, remotehost=False, createsnap=False, listsnaps=True):
         if output[0]:
             ## may be, someday, convert all host determination to lambda
             whichhost=lambda x: op.host if remotehost else op.localhost
-            logger('pulling all snapshots list on {0}'.format(whichhost(remotehost)))
+            if log: logger('pulling all snapshots list on {0}'.format(whichhost(remotehost)))
             #logger('pulling all snapshots')
             if snapshots:
-                if remotehost:
-                    logger('finding incremental snapshots on {0}'.format(op.host))
-                else:
-                    logger('finding incremental snapshots on localhost')
+		if log:
+                    if remotehost: logger('finding incremental snapshots on {0}'.format(op.host))
+                    else: logger('finding incremental snapshots on localhost')
                 return snapshots
             else:
-                if remotehost:
-                    logger('snapshots exist but no incremental snapshots found for given pool on {0}'.format(op.host))
-                else:
-                    logger('snapshots exist but no incremental snapshots found for given pool on localhost')
+                if remotehost: logger('snapshots exist but no incremental snapshots found for given pool on {0}'.format(op.host))
+                else: logger('snapshots exist but no incremental snapshots found for given pool on localhost')
                 return False
         else:
-            if remotehost:
-                logger('no snapshots found for requested pool on {0}'.format(op.host))            
-            else:
-                logger('no snapshots found for requested pool on localhost')
+            if remotehost: logger('no snapshots found for requested pool on {0}'.format(op.host))            
+            else: logger('no snapshots found for requested pool on localhost')
             return False
     elif createsnap:
-        if remotehost:
-            logger('creating snapshot {0} on {1}'.format(snapname, op.host))
-        else:
-            logger('creating snapshot {0} on localhost'.format(snapname))
-        return 
+        if remotehost: logger('creating snapshot {0} on {1}'.format(snapname, op.host))
+        else: logger('creating snapshot {0} on localhost'.format(snapname))
+        return snapname
         
         
 class Replicate():
@@ -373,6 +409,7 @@ class Replicate():
         self.poolname = poolname
         self.host = host
         self.time = op.time
+	self.thissnapshot = ''
         self.allsnapshots = {}
         self.diffsnapshots = []
         self.samesnapshots = []
@@ -392,11 +429,11 @@ class Replicate():
         if not findpools(self.poolname, remotehost=True):
             sys.exit(1)
 
-    def listsnapshots(self, remotehost=False):
+    def listsnapshots(self, remotehost=False, log=True):
         '''returns a dict for latest local and remote snapshots; linked to snapshots function'''
         stime = datetime.datetime.now()
         if not remotehost:
-            localsnapshots = snapshots(self.poolname, remotehost=False, listsnaps=True, createsnap=False)
+            localsnapshots = snapshots(self.poolname, remotehost=False, listsnaps=True, createsnap=False, log=log)
             if localsnapshots:
                 self.allsnapshots['local'] = localsnapshots
                 etime = datetime.datetime.now()
@@ -405,7 +442,7 @@ class Replicate():
             else:
                 return False
         if remotehost:
-            remotesnapshots = snapshots(self.poolname, remotehost=True, listsnaps=True, createsnap=False)        
+            remotesnapshots = snapshots(self.poolname, remotehost=True, listsnaps=True, createsnap=False, log=log)
             if remotesnapshots:
                 self.allsnapshots['remote'] = remotesnapshots
                 etime = datetime.datetime.now()
@@ -518,9 +555,11 @@ class Replicate():
                             self.error = 'destination modified'
                             logger('could not send stream, destination fs or zvol has been modified; perhaps it is a good idea to set readonly on {0} at {1}\nfull error:\n{2}'\
                                    .format(self.poolname, self.host, ' '.join(errors)), 'error', funcname)
+			    return False
                         else:
                             self.error = 'see syslog'
-                            logger('cannot send replication stream, unknown exception\nfull error\n: {0}'.format(' '.join(errors)), 'error', funcname)
+                            logger('cannot send replication stream, unknown exception\nfull error: {0}'.format(' '.join(errors)), 'error', funcname)
+			    # likely no return needed here since it helps in full pool replication to keep going for newly created datasets
                 else:
                     self.success = True
                     if not self.sendtime:
@@ -530,55 +569,60 @@ class Replicate():
         
     def createsnapshot(self):
         '''creates a snapshot, linked to snapshots function'''
-        snapshots(self.poolname, remotehost=False, createsnap=True, listsnaps=False)
+        self.thissnapshot = snapshots(self.poolname, remotehost=False, createsnap=True, listsnaps=False)
         return
 
-    def rotatesnapshots(self, remotehost=False):
-        '''finds local and remote snapshots older than snapkeep and removes them'''
-        global whichhost
-        whichhost=lambda x: op.host if remotehost else op.localhost
-        
-        def deletesnapshot(snapshotfrom, snapshotto, remotehost=remotehost):
-            '''subfunction to actually delete snapshot'''
-            funcname = 'deletesnapshot'
-            snapshottoname = snapshotto.strip('{0}@'.format(self.poolname))
 
-            ## user protection
-            if '@' not in snapshotfrom:
-                logger('zfs destroy requested for something that is not a snapshot, aborting', 'error', funcname)
-            else:
-                zfscmd = ['zfs', 'destroy', '-R', '{0}%{1}'.format(snapshotfrom, snapshottoname)]
-                if remotehost:
-                    sshcmd = op.ssh[:]
-                    for i in zfscmd:
-                        sshcmd.append(i)
-                        zfscmd = sshcmd
-                try:
-                    with tempfile.NamedTemporaryFile() as tmpfile:        
-                        output = subprocess.Popen(zfscmd, stdout=tmpfile, stderr=tmpfile)
-                        tmpfile.seek(0)
-                        if not tmpfile.readlines():
-                            logger('recursively rotated snapshots older than {0} on {1}'.format(snapshotto, whichhost(remotehost)))
-                            return True
-                        else:
-                            logger('errors ecountered during snapshot rotation on {0}'.format(whichhost(remotehost)), 'error', funcname)
-                            return False
-                except OSError:
-                    logger('zfs deletion error, is zfs installed?', 'error', funcname)
-                    return False
-                    
+    def deletesnapshot(self, snapshotfrom, snapshotto, remotehost=False, single=False):
+	'''method to actually delete snapshot'''
+	whichhost=lambda: op.host if remotehost else op.localhost
+	funcname = 'deletesnapshot'
+	snapshottoname = snapshotto.strip('{0}@'.format(self.poolname))
+	## user protection
+	if '@' not in snapshotfrom:
+		logger('zfs destroy requested for something that is not a snapshot, aborting', 'error', funcname)
+	else:
+		if not single: zfscmd = ['zfs', 'destroy', '-R', '{0}%{1}'.format(snapshotfrom, snapshottoname)]
+		elif single: zfscmd = ['zfs', 'destroy', '-f', '-d', snapshotfrom]
+		if remotehost:
+			sshcmd = op.ssh[:]
+			for i in zfscmd:
+				sshcmd.append(i)
+				zfscmd = sshcmd
+		try:
+			with tempfile.NamedTemporaryFile() as tmpfile:            
+				output = subprocess.Popen(zfscmd, stdout=tmpfile, stderr=tmpfile)
+				tmpfile.seek(0)
+				if not tmpfile.readlines():
+					if not single: logger('recursively rotated snapshots older than {0} on {1}'.format(snapshotto, whichhost()))
+					else: logger('deleted snapshot {0} on {1}'.format(snapshotfrom, whichhost()))
+					return True
+				else:
+					if not single: logger('errors encountered during snapshot rotation on {0}'.format(whichhost()), 'error', funcname)
+					else: logger('errors encountered during snapshot deletion on {0}'.format(whichhost()), 'error', funcname)
+					tmpfile.seek(0)
+					print "output:", output, "tmpfile: ", tmpfile.readlines()
+					return False
+		except OSError as e:
+			logger('zfs deletion error: {0}'.format(e), 'error', funcname)
+			return False
+
+
+    def rotatesnapshots(self, remotehost=False):
+        '''finds local and remote snapshots older than snapkeep and removes them, uses deletesnapshot'''
+        whichhost=lambda x: op.host if remotehost else op.localhost
         localsnapshots = self.allsnapshots['local']
         remotesnapshots = self.allsnapshots['remote']
         if len(localsnapshots) > op.snapkeep:
             localdestroyfrom = localsnapshots[:-op.snapkeep][0]
             if not remotehost:
                 logger('found {0} snapshots to be rotated on localhost'.format(len(localsnapshots)-op.snapkeep))
-                deletesnapshot(localsnapshots[:-op.snapkeep][0], localsnapshots[:-op.snapkeep][-1])
+                self.deletesnapshot(localsnapshots[:-op.snapkeep][0], localsnapshots[:-op.snapkeep][-1], remotehost=remotehost)
             else:
                 ## needed on ZOL since it does not destory snapshots that does not exist on sending side
                 ## see ZOL bug# 1253: https://github.com/zfsonlinux/zfs/issues/1253
                 logger('found {0} snapshots to be rotated on {1}'.format(len(localsnapshots)-op.snapkeep, self.host))
-                deletesnapshot(remotesnapshots[:-op.snapkeep][0], remotesnapshots[:-op.snapkeep][-1])
+                self.deletesnapshot(remotesnapshots[:-op.snapkeep][0], remotesnapshots[:-op.snapkeep][-1], remotehost=remotehost)
         else:
             logger('0 snapshots to be rotated on {0}'.format(whichhost(remotehost)))
         return
@@ -589,21 +633,28 @@ class Replicate():
         return self.totaltimespent
             
         
-def bzman(inst, pool, host):
+def bzman(inst, pool, host, dataset=False):
     '''creates Replicate instances, handles stream sending layout and records to shelve objects'''
     meetconditions()
-    findpools(pool)
+    ## if dataset instead of pool
+    if not dataset: 
+	findpools(pool)
+    else: 
+	findpools(dataset=True)
     global instname
     instname = inst
     ## quirk to create a Replicate instance by unix timestamp as variable name
     instname = Replicate(pool, host)
-    instname.initialpoolsetup()
-    if not instname.listsnapshots(remotehost=False) and not instname.listsnapshots(remotehost=True):
+    if not dataset: instname.initialpoolsetup()
+    if not instname.listsnapshots(remotehost=False, log=False) and not instname.listsnapshots(remotehost=True, log=False):
         logger('assuming the very first full pool replication ...')
         instname.createsnapshot()
         instname.listsnapshots()
-        instname.sendstream(firstrep=True)
-        logger('incremental replication will resume on the next run, see ya soon!')
+        if instname.sendstream(firstrep=True): logger('full initial replication done so incremental replication will resume on the next run, see you soon!')
+	else:
+	    logger('deleting the snapshot that just got created since initial replication failed'.format(instname.thissnapshot), 'error', 'bzman')
+	    instname.deletesnapshot(instname.thissnapshot, instname.thissnapshot, remotehost=False, single=True)
+
     else:
         instname.listsnapshots(remotehost=False)
         instname.listsnapshots(remotehost=True)
@@ -760,7 +811,8 @@ def main():
         if op.send:
             try:
                 timestamp = 'ts{0}'.format(op.dbtime)    
-                bzman(timestamp, op.poolname, op.host)
+                if op.senddataset: bzman(timestamp, op.poolname, op.host, dataset=True)
+		else: bzman(timestamp, op.poolname, op.host)
             finally:
                 updatedb()    
 
@@ -772,6 +824,9 @@ def main():
  
     except KeyboardInterrupt:
         sys.exit(1)
+    except:
+	print "Unexpected error:", sys.exc_info(), traceback.print_exc()
+
     finally:
         sys.stdout.flush()
     return
