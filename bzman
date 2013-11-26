@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+import gdbm
 import getopt
 import signal
 import syslog
@@ -14,7 +15,7 @@ import smtplib
 import datetime
 import tempfile
 import subprocess
-import traceback
+#import traceback
 from platform import node
 import logging, logging.handlers
 from email.mime.text import MIMEText
@@ -675,13 +676,22 @@ def bzman(inst, pool, host, dataset=False):
     print '{0:<22}: {1:>22}'.format('  total time',instname.totaltimespent)
     return
 
+
+def gdbmshelve(filename, flag="c"):
+    '''force shelve to use gdbm instead of dbm'''
+    # dbm has key limitation of 512 bytes in some cases and causes fucked up behaviour on unix
+    # installed gdbm via pkgin instead
+    return shelve.Shelf(gdbm.open(filename, flag))
+
     
 def updatedb():
-    try:
-        db = shelve.open('bzman.db')
-        db[op.dbtime] = instname
+    try:	
+        db = gdbmshelve('bzman.db')
+	db[op.dbtime] = instname
         logger('logging replication details into the database')
     finally:
+	time.sleep(.2)
+	sys.stdout.flush()
         db.close()
     return
     
@@ -692,18 +702,18 @@ def replicareport(htmlformat=False):
     ## python2 does not allow default args after varargs
     def returnrow(*columns, **d):
         '''returns a new formatted row'''
-        row = '{0:<7} {1:<34} {2:<8} {3:<16} {4:<20}'.format(*columns)
+        row = '{0:<20} {1:<55} {2:<8} {3:<16} {4:<20}'.format(*columns)
         if d['htmlformat']:
             row = '<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td></tr>'.format(*columns)
         return row
     try:
-        db = shelve.open('bzman.db')
+        db = gdbmshelve('bzman.db')
         textreport = []
         htmlreport = []
         ## only print when html report is not requested
         if not htmlformat:
             print returnrow('host', 'increment from', '...to', 'time consumed', 'result', htmlformat=False)
-            print '---------------------------------------------------------------------------------'
+            print '-------------------------------------------------------------------------------------------------------------'
         keys = db.keys()
         keys.sort()
         if htmlformat:
@@ -718,11 +728,22 @@ def replicareport(htmlformat=False):
             ## print '--' for blank values
             if not v.host:
                 v.host = '--'
-            ## strip similar characters off incrementto, we don't want to repeat ourselves or crank up bulky reports    
+
             if not v.incrementfrom:
                 v.incrementfrom = '--'
             else:
+		## strip similar characters off incrementto to not to crank up bulky reports
                 v.incrementto = v.incrementto[-6:]
+		## shrinking down the uuids from dataset name of incrementfrom that illumous-kvm carries
+		if '/' in v.incrementfrom:
+		    sfrom = v.incrementfrom
+		    p = sfrom.split('/')[0]
+		    d = sfrom.split('/')[1].split('@')[0]
+		    s = sfrom.split('/')[1].split('@')[1]
+		    if len(d) > 36:
+		        d = '{0}...{1}'.format(d[:4], d[-8:])
+		    v.incrementfrom = p+'/'+d+'@'+s
+
             if not v.incrementto:
                 v.incrementto = '--'
             if not result:
@@ -824,8 +845,8 @@ def main():
  
     except KeyboardInterrupt:
         sys.exit(1)
-    except:
-	print "Unexpected error:", sys.exc_info(), traceback.print_exc()
+#    except:
+#	print "Unexpected error:", sys.exc_info(), traceback.print_exc()
 
     finally:
         sys.stdout.flush()
