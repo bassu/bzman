@@ -448,6 +448,7 @@ class Replicate():
                 self.allsnapshots['remote'] = remotesnapshots
                 etime = datetime.datetime.now()
                 self.remotelisttime = etime-stime
+                return True
             else:
                 return False
         
@@ -647,7 +648,13 @@ def bzman(inst, pool, host, dataset=False):
     ## quirk to create a Replicate instance by unix timestamp as variable name
     instname = Replicate(pool, host)
     if not dataset: instname.initialpoolsetup()
-    if not instname.listsnapshots(remotehost=False, log=False) and not instname.listsnapshots(remotehost=True, log=False):
+    lsnaps = instname.listsnapshots(remotehost=False, log=False)
+    rsnaps = instname.listsnapshots(remotehost=True, log=False)
+    print "lsnaps: ", lsnaps
+    print "rsnaps: ", rsnaps
+    if (not lsnaps and not rsnaps) or (lsnaps and not rsnaps):
+        if lsnaps and not rsnaps: 
+            logger('found remains of a probable incomplete initial send-transaction ...')
         logger('assuming the very first full pool replication ...')
         instname.createsnapshot()
         instname.listsnapshots()
