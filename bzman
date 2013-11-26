@@ -52,7 +52,7 @@ class Options():
         ## other defaults
         self.timeobj = datetime.datetime.now()
         self.time = self.timeobj.strftime('%Y-%m-%dT%H:%M')
-        self.dbtime = self.timeobj.strftime('D%Y%m%dT%H%M')
+        self.dbtime = self.timeobj.strftime('D%Y%m%dT%H%MM{0}'.format(self.timeobj.microsecond))
         self.localhost = node().split('.')[0]
         ## parse the opts and their values
         try:
@@ -515,7 +515,7 @@ class Replicate():
                 ## the subprocess commands    
                 try:
                     if not op.usembuffer:
-                        logger('mbuffer disabled, using ssh to send replication stream')
+                        logger('using ssh to send replication stream')
                         output = subprocess.Popen(zfssend, stdout=subprocess.PIPE, stderr=tmpfile)
                         pipe1 = subprocess.Popen(sshcmd, stdin=output.stdout, stderr=tmpfile)
                     else:
@@ -694,10 +694,10 @@ def gdbmshelve(filename, flag="c"):
 def updatedb():
     try:	
         db = gdbmshelve('bzman.db')
+	time.sleep(.1)
 	db[op.dbtime] = instname
         logger('logging replication details into the database')
     finally:
-	time.sleep(.2)
 	sys.stdout.flush()
         db.close()
     return
