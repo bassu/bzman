@@ -104,7 +104,7 @@ class Options():
                 if self.send == True:     
                    if args:
                            self.host = args[0]
-                           self.ssh = ['ssh', '-T', '-c', 'arcfour', '-o', 'Compression=no', '-x', '-p22', self.host, '--']
+                           self.ssh = ['ssh', '-T', '-c', 'arcfour', '-o', 'Compression=no', '-x', '-p1998', self.host, '--']
                    else:
                            print "bzman: you must specify the host to send the zfs stream to!"
                            print "see -h for options"
@@ -621,15 +621,14 @@ class Replicate():
                 '''finds local and remote snapshots older than snapkeep and removes them, uses deletesnapshot'''
                 localsnapshots = self.allsnapshots['local']
                 remotesnapshots = self.allsnapshots['remote']
-                if len(localsnapshots) > op.snapkeep:
-                        localdestroyfrom = localsnapshots[:-op.snapkeep][0]
+                if len(localsnapshots) > op.snapkeep or len(remotesnapshots) > op.snapkeep:
                         if not remotehost:
-                                logger('found {0} snapshots to be rotated on {1}'.format(len(localsnapshots)-op.snapkeep), whichhost(remotehost))
+                                logger('found {0} snapshots to be rotated on {1}'.format(len(localsnapshots)-op.snapkeep, whichhost(remotehost)))
                                 self.deletesnapshot(localsnapshots[:-op.snapkeep][0], localsnapshots[:-op.snapkeep][-1], remotehost=remotehost)
                         else:
-                                ## needed on ZOL since it does not destory snapshots that does not exist on sending side
-                                ## see ZOL bug# 1253: https://github.com/zfsonlinux/zfs/issues/1253
-                                logger('found {0} snapshots to be rotated on {1}'.format(len(localsnapshots)-op.snapkeep, self.host))
+                                ## needed on ZOL since it does not destory snapshots that don't exist on sending side
+                                ## see ZOL bug 1253: https://github.com/zfsonlinux/zfs/issues/1253
+                                logger('found {0} snapshots to be rotated on {1}'.format(len(remotesnapshots)-op.snapkeep, self.host))
                                 self.deletesnapshot(remotesnapshots[:-op.snapkeep][0], remotesnapshots[:-op.snapkeep][-1], remotehost=remotehost)
                 else:
                         logger('0 snapshots to be rotated on {0}'.format(whichhost(remotehost)))
