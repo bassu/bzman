@@ -586,11 +586,12 @@ class Replicate():
         def deletesnapshot(self, snapshotfrom, snapshotto, remotehost=False, single=False):
                 '''method to actually delete snapshot'''
                 funcname = 'deletesnapshot'
-                snapshottoname = snapshotto.strip('{0}@'.format(self.poolname))
+                snapshottoname = snapshotto.split('@')[1]
                 ## user protection
                 if '@' not in snapshotfrom:
                                 logger('zfs destroy requested for something that is not a snapshot, aborting', 'error', funcname)
                 else:
+                                # there may not be a need of 'single' since both from and to part of snapshots can be same for zfs destroy (i suppose)
                                 if not single: zfscmd = ['zfs', 'destroy', '-R', '{0}%{1}'.format(snapshotfrom, snapshottoname)]
                                 elif single: zfscmd = ['zfs', 'destroy', '-f', '-d', snapshotfrom]
                                 if remotehost:
@@ -604,7 +605,7 @@ class Replicate():
                                                                 tmpfile.seek(0)
                                                                 if not tmpfile.readlines():
                                                                                 if not single: logger('recursively rotated snapshots older than {0} on {1}'.format(snapshotto, whichhost(remotehost)))
-                                                                                else: logger('deleted snapshot {0} on {1}'.format(snapshotfrom, whichhost()))
+                                                                                else: logger('deleted snapshot {0} on {1}'.format(snapshotfrom, whichhost(remotehost)))
                                                                                 return True
                                                                 else:
                                                                                 if not single: logger('errors encountered during snapshot rotation on {0}'.format(whichhost(remotehost)), 'error', funcname)
@@ -644,10 +645,8 @@ def bzman(inst, pool, host, dataset=False):
         '''creates Replicate instances, handles stream sending layout and records to shelve objects'''
         meetconditions()
         ## if dataset instead of pool
-        if not dataset: 
-                findpools(pool)
-        else: 
-                findpools(dataset=True)
+        if not dataset: findpools(pool)
+        else: findpools(dataset=True)
         global instname
         instname = inst
         ## quirk to create a Replicate instance by unix timestamp as variable name
