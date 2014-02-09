@@ -1,0 +1,94 @@
+#!/bin/bash
+#.bashrc for smartos unix
+# 21 Nov, 2013 by bassu                                                                             
+
+# don't proceed for non-interactive shells i.e. scp and rsync
+[[ $(expr index "$-" i) -eq 0 ]] && return
+
+# prompt and term title                                                                                          
+PS1='\[\e[00;34m\][\u@\h \W]\$\[\e[0m\] '
+PATH=$PATH:/opt/bzman
+export PS1
+export PATH
+
+# aliases
+alias ls='ls --color'
+alias ll='ls -lhB --color'
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+alias ssh='ssh -p22 -x -o Compression=no -c arcfour'
+alias sddate='TZ="America/Los_Angeles" date'
+alias bzman='/opt/bzman/bzman --db=/opt/bzman/bzman'
+
+# setting default timezone as smartos is volatile live os
+export TZ='America/Los_Angeles'
+
+# misc variables
+export EDITOR='vim'
+LS_COLORS='no=00:fi=00:di=34:ow=34;40:ln=35:pi=30;44:so=35;44:do=35;44:bd=33;44:cd=37;44:or=05;37;41:mi=05;37;41:ex=01;31:'
+export LS_COLORS
+
+# continuous history
+shopt -s cmdhist
+shopt -s histappend
+export HISTFILE='/opt/.bash_history'
+export HISTTIMEFORMAT='%F %T '
+export HISTSIZE=10000000
+
+# below prevents PS1 from getting screwed if you login to console and resets the title
+case $TERM in
+    rxvt*|xterm*)
+        PROMPT_COMMAND='history -a; echo -ne "\033]0;${USER}@${HOSTNAME%%.*}:${PWD/#$HOME/~}"; echo -ne "\007"'
+        ;;
+       *)
+        PROMPT_COMMAND='history -a;'
+        ;;
+esac 
+
+# vnicstat
+vnicstat() { printf "%0s %15s %8s %10s %10s\n" ALIAS ZONEID VNIC rMB oMB; for l in {1..55}; do printf '-'; done; printf '\n'; for vma in $(vm list -H -o uuid); do id=$(vm get $vma | json zoneid); alias=$(vm get $vma | json alias | sed 's/ /-/g'); nics=($(kstat -c net -p | grep z$id | grep $vma | cut -d: -f3)); printf "%-15s %-5s\n" $alias $id; printf "%30s %10s %10s\n" $(for n in ${nics[@]}; do rm=$(kstat -p unix:0:$n:rbytes | awk '{mib=($2/1048576); printf "%.2f", mib}'); om=$(kstat -p unix:0:$n:obytes | awk '{mib=($2/1048576); printf "%.2f", mib}'); printf "%s %s %s\n" $(printf "%s" $n|cut -d'_' -f2) $rm $om; done); done }
+
+
+## set terminal width
+if [ "$PS1" ]; then
+    mt_tty=$(/usr/bin/tty 2>/dev/null)
+    if [[ $mt_tty =~ ^/dev/term/[abcd] || $mt_tty =~ /dev/wscons ]]; then
+        # If we're on the serial console, we generally won't know how
+        # big our terminal is.  Attempt to ask it using control sequences
+        # and resize our pty accordingly.
+        mt_output=$(/usr/lib/measure_terminal 2>/dev/null)
+        if [[ $? -eq 0 ]]; then
+            eval "$mt_output"
+        else
+            # We could not read the size, but we should set a 'sane'
+            # default as the dimensions of the previous user's terminal
+            # persist on the tty device.
+            export LINES=25
+            export COLUMNS=80
+        fi
+        /usr/bin/stty rows ${LINES} columns ${COLUMNS} 2>/dev/null
+        # Below prevents PS1 from getting screwed if you login to console
+        # added by bassu
+        export PROMPT_COMMAND='history -a;'
+    fi
+fi
+
+# load bash completion
+[ -f /etc/bash/bash_completion ] && . /etc/bash/bash_completion
+
+# some handy smartos functions
+svclog() {
+  if [[ -z "$PAGER" ]]; then
+    PAGER=less
+  fi
+  $PAGER `svcs -L $1`
+}
+svclogf() {
+  /usr/bin/tail -f `svcs -L $1`
+}
+
+
+# login msg
+echo -e " \e[0;34mThis is Unix on ZFS\n Release: $(uname -sr) $(uname -v | cut -d'_' -f2)\n\e[0m"
+

@@ -1,0 +1,6 @@
+TZ=America/Los_Angeles
+SHELL=/usr/bin/bash
+
+0,10,20,30,40,50    *    *    *    *    /opt/local/bin/python2.6 /opt/bzman/bzman -m -c >/dev/null 2>&1
+59		    23   1-7  *    *    /opt/bzman/smartos/runmaintenance.sh >/dev/null 2>&1
+
