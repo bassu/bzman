@@ -1,4 +1,4 @@
-### SmartOS
+### Setup for SmartOS
 As SmartOS completely runs in RAM, setting up crontabs on it involves creating an SMF service script to load crontabs on system boot. So scripts provided in this directory can be used as an example to setup bzman to manage replication between two machines (i.e. primary and its backup).
 
 Basically you also have to change host names, set ssh keys, probably host files and update sendmail alias. In our example, this is being automatically done in ```custom/setup.sh```. Below is how one would do it on primary host (the one being backed up). It also includes a better ```.bashrc``` bash profile file including a maintenance script to run monthly scrub on first Saturday and to recycle bzman database. This assumes that you have a secondary backup machine with SmartOS readily setup and available.
@@ -29,4 +29,9 @@ For a proper setup, you may also want to repeat the below process *first* on thi
 
 	# that's pretty much it
 	bzman --help
+
+##### Note on timezone
+Since bzman creates snapshot names with ISO 8601 format date, it is important to keep **one** timezone environment for all of your SmartOS machines because that's how they are identified for ease of manageability. And of course because the system env is volatile in SmartOS, the default timezone UTC is pretty much unconfigurable. If you change it in bash profile, then you also have to change to it in the scripts and cron env. If you don't touch it at all, that's fine too. Whatever you choose, just stick with one TZ in your env everywhere. Above example scripts use PST.
+
+
 
