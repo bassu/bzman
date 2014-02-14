@@ -1,6 +1,9 @@
 bzman
 =====
 
+[![Donate](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=mbrant%40phi9%2ecom&lc=US&item_name=Bzman&no_note=0&currency_code=USD&bn=PP%2dDonationsBF%3abtn_donateCC_LG%2egif%3aNonHostedGuest)
+
+
 Bassu's ZFS (replication) Manager
 ---------------------------------
 
@@ -112,7 +115,7 @@ A backup machine technically should have the same pool name as the source one un
 
 	-p             print the daily report of incremental snapshots streams,
 				   looks like a replication log and currently does not check
-				   terminal dimentions so better suited in better terminals
+				   terminal dimentions so better suited in maximized terminals
 
 	-r [to]        sends immediate daily HTML report of incremental streams
 				   to [to] recipient email address
