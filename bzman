@@ -31,6 +31,7 @@ import datetime
 import tempfile
 import subprocess
 #import traceback
+from md5 import md5
 from platform import node
 import logging, logging.handlers
 from email.mime.text import MIMEText
@@ -503,6 +504,18 @@ class Replicate():
         stime = datetime.datetime.now()
         localsnapshots = self.allsnapshots['local']
         remotesnapshots = self.allsnapshots['remote']
+    
+        ## issue 1 on github; support sending to different dataset
+        ## this is where we are going to add the new algo for finding diff based on new identifier in snapshot name
+        ## couple of sane options here
+        # 1) covert bin to hex through hexlify (equivalent to Ruby's unpack) using 4 bits high nibbles (first two chars) 
+        #    basic two way asymmetric encryption but it doubles the length of string of course
+        # 2) python's builtin hash function gives int hash; though it can be negative but I heard that its last 8 characters 
+        #    are unique enough to not to cause collisions -- that's a bluff for sure LOL
+        # 3) or may be use md5 to generate a one-way hash and take last 8 chars out of it with hopefully no probable collisions
+        # e.g md5('localpool/dataset remotepool/tvol').hexdigest()[:8]
+        
+        
         self.diffsnapshots = []
         for i in localsnapshots:
             if i not in remotesnapshots:
