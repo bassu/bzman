@@ -410,7 +410,7 @@ def snapshots(poolname, remotehost=False, createsnap=False, listsnaps=True, log=
     try:
         ## making the cmds
         if listsnaps:
-            zfscmd = ['zfs', 'list', '-t', 'snapshot', '-H', '-o', 'name', '-s', 'name']
+            zfscmd = ['zfs', 'list', '-r', '-t', 'snapshot', '-H', '-o', 'name', '-s', 'name', poolname]
         elif createsnap:
             snapname = '{0}@{1}-{2}'.format(poolname, op.snapprefix, op.time)
             zfscmd = ['zfs', 'snapshot', '-r', snapname]
