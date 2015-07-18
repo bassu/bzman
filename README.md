@@ -1,8 +1,6 @@
 bzman
 =====
 
-[![Donate](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=mbrant%40phi9%2ecom&lc=US&item_name=Bzman&no_note=0&currency_code=USD&bn=PP%2dDonationsBF%3abtn_donateCC_LG%2egif%3aNonHostedGuest)
-
 
 Bassu's ZFS (replication) Manager
 ---------------------------------

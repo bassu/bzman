@@ -223,10 +223,10 @@ def logger(msg, level='info', mailsubject='', printlog=True):
 
     # now the conditional smtp logger handler; and only once
     if level == 'error' and len(getattr(logger, 'handlers', None)) != 2:
-        maillog = logging.handlers.SMTPHandler((op.smtpserver, op.smtpport), op.smtpfrom, op.smtpto, 'pzman: ERROR at {0}'.format(mailsubject))
+        maillog = logging.handlers.SMTPHandler((op.smtpserver, op.smtpport), op.smtpfrom, op.smtpto, 'bzman: ERROR at {0}'.format(mailsubject))
         # uncomment if mta requires authentication                                       
         # maillog = logging.handlers.SMTPHandler(('localhost','25'),\
-        #                                       'from@example.com', 'to@example.com', 'pzman: ERROR at {0}'.format(mailsubject),\
+        #                                       'from@example.com', 'to@example.com', 'bzman: ERROR at {0}'.format(mailsubject),\
         #                                       ('user@example.com','password'))
         maillog.setLevel(logging.ERROR)
         maillog.setFormatter(formatter)
