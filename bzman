@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-#    Copyright 2014 Abbas Khan a.k.a "Bassu"
+#    Copyright 2016 Abbas Khan a.k.a "Bassu"
 #
 #
 #    This program is free software: you can redistribute it and/or modify
@@ -712,6 +712,13 @@ def bzman(inst, pool, host, dataset=False):
         instname.listsnapshots(remotehost=False)
         instname.listsnapshots(remotehost=True)
         instname.computestream()
+        # for you tricky dickies out there trying to run me from flipped source/destination
+        if instname.incrementfrom > instname.incrementto:
+            logger('increment-from snapshot seems older than the one to increment to, so creating a new one ...')
+            instname.createsnapshot()
+            time.sleep(4)
+            instname.listsnapshots()
+            instname.computestream()
         instname.sendstream()
         instname.createsnapshot()
         instname.rotatesnapshots(remotehost=False)
